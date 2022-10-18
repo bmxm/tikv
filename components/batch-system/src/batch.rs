@@ -285,7 +285,30 @@ impl HandleResult {
     }
 }
 
-/// A handler that polls all FSMs in ready.
+// 大体来看，状态机分成两种，normal 和 control。
+// 对于每一个 Batch System，只有一个 control 状态机，负责管理和处理一些需要全局视野的任务。其他 normal 状态机负责处理其自身相关的任务。
+// 每个状态机都有其绑定的消息和消息队列。PollHandler 负责驱动状态机，处理自身队列中的消息。
+// Batch System 的职责就是检测哪些状态机需要驱动，然后调用 PollHandler 去消费消息。消费消息会产生副作用，而这些副作用或要落盘，或要网络交互。
+// PollHandler 在一个批次中可以处理多个 normal 状态机。
+//
+// 在 RaftStore 里，一共有两个 Batch System。
+// 分别是 RaftBatchSystem 和 ApplyBatchSystem。RaftBatchSystem 用于驱动 Raft 状态机，包括日志的分发、落盘、状态跃迁等。
+// 已经提交的日志会被发往 ApplyBatchSystem 进行处理。ApplyBatchSystem 将日志解析并应用到底层 KV 数据库中，执行回调函数。
+// 所有的写操作都遵循着这个流程。
+
+// 具体一点来说：
+// 每个 PollHandler 对应一个线程，其在 poll 函数中会持续地检测需要驱动的状态机并进行处理，此外还可能将某些 hot region 路由给其他 PollHandler 来做一些负载均衡操作。
+// 每个 region 对应一个 raft 组，而每个 raft 组在一个 BatchSystem 里就对应一个 normal 状态机，
+// 对于 RaftBatchSystem，参照 https://mp.weixin.qq.com/s?__biz=MzI3NDIxNTQyOQ==&mid=2247487915&idx=1&sn=7793e9e11850a9403b4f9ff3bc014fbe&chksm=eb1636c1dc61bfd7c905a847e3c9b7616695c5c162ffce2154e5583704d4a6f01238de6b884c&scene=21#wechat_redirect
+// 中提到的 raft-rs 接口，每个 normal 状态机在一轮 loop 中被 PollHandler 获取一次 ready，其中一般包含需要持久化的未提交日志，需要发送的消息和需要应用的已提交日志等。
+// 对于需要持久化的未提交日志，最直接的做法便是将其暂时缓存到内存中进行攒批，然后在当前 loop 结尾的 end 函数中统一同步处理，这无疑会影响每轮 loop 的效率，
+// TiKV 的 6.x 版本已经将 loop 结尾的同步 IO 抽到了 loop 外交给了额外的线程池去做，这进一步提升了 store loop 的效率，具体可参考该 issue。
+// 对于需要发送的消息，则通过 Transport 异步发送给对应的 store。对于需要应用的已提交日志，则通过 applyRouter 带着回调函数发给 ApplyBatchSystem。
+// 对于 ApplyBatchSystem，每个 normal 状态机在一轮 loop 中被 PollHandler 获取 RaftBatchSystem 发来的若干已经提交需要应用的日志，其需要将其攒批提交并在之后执行对应的回调函数返回客户端结果。
+// 需要注意的是，返回客户端结果之后 ApplyBatchSystem 还需要向 RaftBatchSystem 再 propose ApplyRes 的消息，从而更新 RaftBatchSystem 的某些内存状态，
+// 比如 applyIndex，该字段的更新能够推动某些阻塞在某个 ReadIndex 上的读请求继续执行。
+
+/// A handler that poll all FSM in ready.
 ///
 /// A general process works like the following:
 ///

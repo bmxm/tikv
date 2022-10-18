@@ -13,6 +13,9 @@ use tikv::{
 };
 
 fn main() {
+    // env!：此宏用于检查编译期的环境变量。在很多语言中，从环境变量访问值主要是在运行时完成的。
+    // 在Rust中，通过使用此宏，你可以在编译期解析环境变量。请注意，当找不到定义的变量时，此宏会引发灾难性故障。
+    // 因此安全版本的宏是option_env!
     let build_timestamp = option_env!("TIKV_BUILD_TIME");
     let version_info = tikv::tikv_version_info(build_timestamp);
 
@@ -180,13 +183,13 @@ fn main() {
                     None
                 },
             )
-            .unwrap_or_else(|e| {
-                panic!(
-                    "invalid auto generated configuration file {}, err {}",
-                    path.display(),
-                    e
-                );
-            })
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "invalid auto generated configuration file {}, err {}",
+                        path.display(),
+                        e
+                    );
+                })
         });
 
     server::setup::overwrite_config_with_cmd_args(&mut config, &matches);
@@ -210,6 +213,7 @@ fn main() {
         process::exit(0);
     }
 
+    // 启动 tikv 进程
     match config.storage.engine {
         EngineType::RaftKv => server::server::run_tikv(config),
         EngineType::RaftKv2 => server::server2::run_tikv(config),

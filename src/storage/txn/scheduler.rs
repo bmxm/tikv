@@ -239,14 +239,38 @@ impl SchedulerTaskCallback {
     }
 }
 
+// 最开始看到 id_alloc 和 task_slots 的介绍时往往会好奇为每个 command 生成唯一 id 的意义是什么？task_slots 里面存的上下文到底是什么？
+// 实际上这与 TiKV 的异步执行框架有关系。
+//
+// Storage 模块执行事务请求的关键函数 schedule_command 中，每个请求一进入函数首先会申请一个递增唯一的 cid，
+// 接着依据该 cid 将本次请求的 command 包在一个 task 中，然后将该 task 附带 callback 生成一个 TaskContext 插入到 task_slot 中，
+// 之后便会尝试去申请 latches，如果成功便会继续调用 execute 函数去真正执行 task，否则便似乎没有下文了？那么如果 task 申请 latches 失败，之后该 task 会在什么时候被执行呢？
+//
+// 进入 Latches::acquire函数中去细究，可以看到其会渐进的去收集所有 latch，如果在本次函数调用中没有收集到所有的 latch， 当前线程不会受到任何阻塞而是直接返回 false。
+// 当然在返回 false 之前其也会利用 latch.wair_for_wak e函数将当前 task 的 id 放到对应 latch 的 waiting 队列里面，之后当前线程便可以处理其他的任务而不是阻塞在该任务上。
+// 由于每个获取到所有 latch 去执行的任务会在执行结束后调用 scheduler::release_lock 函数来释放所拥有的全部 latch，在释放过程中，
+// 其便能够获取到阻塞在这些 latch 且位于 waiting 队列首位的所有其他 task，接着对应线程会调用scheduler::try_to_wake_up 函数遍历唤醒这些 task 并尝试再次获取 latch 和执行，
+// 一旦能够获取成功便去 execute，否则继续阻塞等待其他线程再次唤醒即可。
+//
+// 实际上一旦构造出 TaskContext 并插入到 task_slots 中，只要持有 id 便可以去 task_slots 中获取到该 task 和其对应的 callback，那么任何一个线程都可以去执行该任务并返回客户端对应的执行结果。
+// 总体来看，这样的异步执行方案相当于在 command 级别抽象出了一套类协程调度逻辑，再辅以 Rust 原生的无栈协程，减少了很多 grpc 线程之间的同步阻塞和切换。
+// 通过本小节，希望您能够了解 Storage 模块的组织结构，并对 scheduler 的异步并发请求调度方案有一定的认知，能够在正确的位置去追踪单个请求的异步调用路径。
 struct SchedulerInner<L: LockManager> {
     // slot_id -> { cid -> `TaskContext` } in the slot.
+    //
+    // 用于存储 Scheduler 中所有请求的上下文，比如暂时未能获取到所有所需 latch 的请求会被暂存在 task_slots 中
     task_slots: Vec<CachePadded<Mutex<HashMap<u64, TaskContext>>>>,
 
     // cmd id generator
+    //
+    // 到达 Scheduler 的请求都会被分配一个唯一的 command id
     id_alloc: CachePadded<AtomicU64>,
 
     // write concurrency control
+    // 写请求到达 Scheduler 之后会尝试获取所需要的 latch，
+    // 如果暂时获取不到所需要的 latch，
+    // 其对应的 command id 会被插入到 latch 的 waiting list 里，
+    // 当前面的请求执行结束后会唤醒 waiting list 里的请求继续执行。
     latches: Latches,
 
     sched_pending_write_threshold: usize,
@@ -267,10 +291,14 @@ struct SchedulerInner<L: LockManager> {
 
     control_mutex: Arc<tokio::sync::Mutex<bool>>,
 
+    // 悲观事务冲突管理器，当多个并行悲观事务之间存在冲突时可能会暂时阻塞某些事务。
+    // TiKV 悲观事务具体原理可参考博客 https://mp.weixin.qq.com/s?__biz=MzI3NDIxNTQyOQ==&mid=2247489495&idx=1&sn=021c9bdfa7774d634ef9a79e9db24ff3&chksm=eb1630bddc61b9ab01eec25a3ec5415399c8a17c36efef3848480c97282711537292505c8556&scene=21#wechat_redirect
     lock_mgr: L,
 
     concurrency_manager: ConcurrencyManager,
 
+    // pipelined_pessimistic_lock/in_memory_pessimistic_lock/enable_async_apply_prewrite：TiKV 悲观事务若干优化引入的新字段，
+    // 具体优化可参考博客 https://mp.weixin.qq.com/s?__biz=MzI3NDIxNTQyOQ==&mid=2247503342&idx=1&sn=bd9cd869f847aaeb38fa863f6387a795&chksm=eb15ea84dc62639232fd985e95397dac4223cb900ecac608fee494c3bf1897ecc5bbbdc31918&scene=21#wechat_redirect
     pipelined_pessimistic_lock: Arc<AtomicBool>,
 
     in_memory_pessimistic_lock: Arc<AtomicBool>,

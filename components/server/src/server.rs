@@ -147,6 +147,11 @@ const CPU_QUOTA_ADJUSTMENT_PACE: f64 = 200.0; // 0.2 vcpu
 
 #[inline]
 fn run_impl<CER: ConfiguredRaftEngine, F: KvFormat>(config: TikvConfig) {
+
+    // 在 run_impl 函数中，首先会调用TikvServer::<CER>::init::<F>(config)函数做若干重要结构的初始化，
+    // 包含但不限于 batch_system, concurrency_manager, background_worker, quota_limiter 等等，
+    // 接着在 tikv.init_servers::<F>() 里将 RPC handler 与 KVService 绑定起来，
+    // 最后在 tikv.run_server(server_config) 中便会使用 grpc server 绑定对应的端口并开始监听连接了
     let mut tikv = TikvServer::<CER>::init::<F>(config);
 
     // Must be called after `TikvServer::init`.
@@ -199,6 +204,9 @@ pub fn run_tikv(config: TikvConfig) {
 
     let _m = Monitor::default();
 
+    // 调用 run_impl 函数并根据配置参数来启动对应的 KV 引擎
+    //
+    // 疑问一：我在这里点 run_impl 为啥找不到对应的函数在哪？
     dispatch_api_version!(config.storage.api_version(), {
         if !config.raft_engine.enable {
             run_impl::<RocksEngine, API>(config)
@@ -269,6 +277,8 @@ struct Servers<EK: KvEngine, ER: RaftEngine> {
 type LocalServer<EK, ER> = Server<resolve::PdStoreAddrResolver, LocalRaftKv<EK, ER>>;
 type LocalRaftKv<EK, ER> = RaftKv<EK, ServerRaftStoreRouter<EK, ER>>;
 
+// 方法与函数是不同的，因为它们在结构体的上下文中被定义（或者是枚举或 trait 对象的上下文），
+// 并且它们第一个参数总是 self，它代表调用该方法的结构体实例。
 impl<ER> TikvServer<ER>
 where
     ER: RaftEngine,

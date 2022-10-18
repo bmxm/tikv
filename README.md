@@ -184,3 +184,12 @@ TiKV is under the Apache 2.0 license. See the [LICENSE](./LICENSE) file for deta
 - Thanks [etcd](https://github.com/coreos/etcd) for providing some great open source tools.
 - Thanks [RocksDB](https://github.com/facebook/rocksdb) for their powerful storage engines.
 - Thanks [rust-clippy](https://github.com/rust-lang/rust-clippy). We do love the great project.
+
+## DeBug
+采用 CLion + intellij-rust 的工具链来调试 Rust 代码。
+需要注意的是，在使用 CLion 调试 TiKV 源码时，需要参照 Cargo book（https://doc.rust-lang.org/cargo/reference/profiles.html）修改 TiKV cargo.toml 中[profile.test] 和 [profile.dev]的 debug 选项（https://github.com/tikv/tikv/blob/master/Cargo.toml#L327，复制链接至浏览器即可查看）来开启调试信息，否则在 Clion 里断点调试时会无法看到对应的堆栈信息。
+
+实际上如果要做到以上读写路径的全链路追踪，最简单的方法便是从集成测试里面寻找一些 case，接着从 Service 模块开始打断点，之后执行调试即可。
+在这里推荐 integrations/server/kv_service.rs中的测试，里面的 test 都会构造TiKVClient发送真实的 RPC 请求，且服务端也基本不包含 Mock 组件，可以完整的去追踪一条 RPC 的全链路流程。
+
+此外由于 TiKV 的代码中有比较多的 spawn 和回调函数，刚开始可能并不能很直接的串起来流程，需要大致了解其异步框架的实现，在正确的闭包位置打下断点，进而熟悉地追踪单条请求的全链路实现。

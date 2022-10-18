@@ -161,6 +161,23 @@ impl<E: Engine, L: LockManager, F: KvFormat> Service<E, L, F> {
     }
 }
 
+// 当前 KVService 对事务 API 例如 kv_prewrite, kv_commit 和 Raw API 例如 raw_get, raw_scan 进行了封装，
+// 由于他们都会被路由到 Storage 模块，所以接口无关的逻辑都被封装到了 handle_request 宏中，
+// 接口相关的逻辑则被封装到了 future_prewirte, future_commit 等 future_xxx 函数中。
+// 需要注意的是，对于 coprocessor API，raft API 等相关接口依然采用了原生对接 grpc-rs 的方式。
+//
+// 宏是一种拓展语言的方式，可以实现超越函数的功能。
+// 如 assert_eq！也写成一个泛型函数，不过 assert_eq! 宏可以做到函数做不到的几件事。
+// 一件事是在断言失败时，assert_eq! 宏可以生成包含断言文件名和行号的错误消息。函数没办法取得这些信息。宏可以，因为它的工作方式与函数完全不同。
+// 宏是某种简写形式。在编译期间，在检查类型和生成任何机器码之前，每个宏调用都会被扩展（expanded）。换句话说，每个宏调用都会被替换成其他一些 Rust 代码。
+//
+// macro_rules! 是 Rust 中定义宏的主要方式。注意在宏定义中，assert_eq 后面没有感叹号 !。只有调用宏的时候才需要包含感叹号 !，定义的时候则不需要。
+// 并非所有的宏都是以这种方式定义的。有几个宏，比如 file!、line!和macro_rules!，本身是内置在编译器中的。还有的方式，如过程宏（procedural macro）。
+// 使用 macro_rules! 定义的宏完全基于模式匹配实现逻辑。宏的主体就是一系列规则：
+//  ( 模式1 ) => ( 模板1 );
+//  ( 模式2 ) => ( 模板2 );
+//  ..
+//
 macro_rules! handle_request {
     ($fn_name: ident, $future_name: ident, $req_ty: ident, $resp_ty: ident) => {
         handle_request!($fn_name, $future_name, $req_ty, $resp_ty, no_time_detail);
@@ -1867,6 +1884,12 @@ fn future_raw_coprocessor<E: Engine, L: LockManager, F: KvFormat>(
     async move { Ok(ret.await) }
 }
 
+// 在事务相关 API 的 future_xxx 函数实现中，对于带有写语义的 future_prewrite, future_commit 等函数，
+// 由于它们会被统一调度到 Storage 模块的 sched_txn_command 函数中，当前又抽象出了 txn_command_future 宏来减少冗余代码；
+// 对于带有读语义的 future_get, future_scan 等函数，由于他们会分别调用 Storage 模块的 get/scan 等函数，因而目前并没有进行进一步抽象。
+//
+// 自 3.x 版本以来，KVService 利用了多个宏显著减少了不同 RPC handler 间的冗余代码，然而这些宏目前还不能被 Clion 等调试工具的函数调用关系链捕捉到，
+// 这可能会困惑刚开始查看函数调用链却无法找到对应 handler 的新同学。
 macro_rules! txn_command_future {
     ($fn_name: ident, $req_ty: ident, $resp_ty: ident, ($req: ident) {$($prelude: stmt)*}; ($v: ident, $resp: ident, $tracker: ident) { $else_branch: expr }) => {
         fn $fn_name<E: Engine, L: LockManager, F: KvFormat>(

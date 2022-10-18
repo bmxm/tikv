@@ -2,6 +2,8 @@
 
 // #[PerformanceCriticalPath]
 
+// Storage 模块位于 Service 与底层 KV 存储引擎之间，主要负责事务的并发控制。TiKV 端事务相关的实现都在 Storage 模块中。
+
 //! This module contains TiKV's transaction layer. It lowers high-level,
 //! transactional commands to low-level (raw key-value) interactions with
 //! persistent storage.
@@ -166,11 +168,20 @@ pub type Callback<T> = Box<dyn FnOnce(Result<T>) + Send>;
 /// and appending timestamp.
 pub struct Storage<E: Engine, L: LockManager, F: KvFormat> {
     // TODO: Too many Arcs, would be slow when clone.
+    // engine 代表的是底层的 KV 存储引擎，利用 Trait Bound 来约束接口，拥有多种实现。
+    // 实际 TiKV 使用的是 RaftKV 引擎，当调用 RaftKV 的 async_write 进行写入操作时，
+    // 如果 async_write 通过回调方式成功返回了，说明写入操作已经通过 raft 复制给了大多数副本，
+    // 并且在 leader 节点（调用者所在 TiKV）完成写入，后续 leader 节点上的读就能够看到之前写入的内容
     engine: E,
 
+    // 事务调度器，负责并发事务请求的调度工作
     sched: TxnScheduler<E, L>,
 
     /// The thread pool used to run most read operations.
+    ///
+    /// 读取线程池，所有只读 KV 请求，包括事务的和非事务的，如 raw get、txn kv get 等最终都会在这个线程池内执行。
+    /// 由于只读请求不需要获取 latches，所以为其分配一个独立的线程池直接执行，而不是与非只读事务共用事务调度器。
+    /// 值得注意的是，当前版本的 readPool 已经支持根据读请求中的 priority 字段来差别调度读请求，而不是全部看做相同优先级的任务来公平调度
     read_pool: ReadPoolHandle,
 
     concurrency_manager: ConcurrencyManager,
